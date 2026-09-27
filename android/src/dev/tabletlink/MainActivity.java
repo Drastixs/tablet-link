@@ -9,6 +9,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.RectF;
+import android.media.AudioManager;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -38,6 +39,7 @@ public final class MainActivity extends Activity implements Link.Events {
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        setVolumeControlStream(AudioManager.STREAM_VOICE_CALL);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         link = new Link(this);
         setupScreen();

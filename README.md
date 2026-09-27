@@ -16,7 +16,7 @@ No third-party libraries are needed. The Android build uses the installed Androi
 4. Connect both devices to Tailscale. Check the desktop's IP with `tailscale ip -4`. Start the companion with `python3 linux/tablet_link.py --output HDMI-A-1`. The server binds only to the desktop's Tailscale IPv4 address. To start it automatically at login, run `./scripts/install-user-service.sh HDMI-A-1` after a successful manual connection.
 5. Open the Android app, enter the desktop's Tailscale IP once, then save. Future launches connect automatically.
 
-Audio devices appear as **Tablet_Link_Speaker** and **Tablet_Link_Microphone**. They become the Linux defaults while connected, so new calls use them automatically; the previous defaults are restored on disconnect. Applications that pin a specific device may still need that device changed in their settings. On disconnect, the companion unloads both PipeWire devices.
+Audio devices appear as **Tablet_Link_Speaker** and **Tablet_Link_Microphone**. They become the Linux defaults while connected, so new calls use them automatically; the previous defaults are restored on disconnect. Applications that pin a specific device may still need that device changed in their settings. On disconnect, the companion turns off the tablet output and unloads both PipeWire devices.
 
 ## Protocol and limits
 

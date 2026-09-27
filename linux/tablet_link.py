@@ -150,7 +150,13 @@ class Session:
         self.sock.sendall(b"\x01")
 
     def prepare_output(self):
+        command("niri", "msg", "output", self.output, "on")
         all_outputs = outputs()
+        for _ in range(20):
+            if self.output in all_outputs and all_outputs[self.output].get("logical"):
+                break
+            time.sleep(0.1)
+            all_outputs = outputs()
         if self.output not in all_outputs:
             raise RuntimeError(f"Output {self.output} is not present in Niri")
         if len(all_outputs) < 2:
@@ -283,7 +289,14 @@ class Session:
                         pass
                 elif kind == 5:
                     self.input(payload)
-                elif kind != 6:
+                elif kind == 6:
+                    modules = command("pactl", "list", "modules", "short")
+                    if any(not any(line.startswith(module + "\t") for line in modules.splitlines())
+                           for module in self.audio.modules):
+                        raise RuntimeError("Tablet audio device stopped")
+                    if self.output not in outputs() or not outputs()[self.output].get("logical"):
+                        raise RuntimeError("Tablet display stopped")
+                else:
                     raise ValueError("Unknown frame type")
         except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
             print(f"Session ended: {error}", file=sys.stderr)
@@ -300,6 +313,7 @@ class Session:
                 self.ydotoold.wait(timeout=2)
             if self.wheel:
                 self.wheel.close()
+            subprocess.run(("niri", "msg", "output", self.output, "off"), capture_output=True)
             self.sock.close()
 
 
@@ -316,8 +330,12 @@ def main():
     secret = bytes.fromhex(secret_file.read_text().strip())
     if len(secret) != 32:
         parser.error(".local-secret must contain 32 random bytes as hex")
-    if args.output not in outputs():
+    available = outputs()
+    if args.output not in available:
         parser.error(f"{args.output} is not in niri msg outputs; a virtual or dummy output is required")
+    if len(available) < 2 or args.output == json.loads(command("niri", "msg", "-j", "focused-output"))["name"]:
+        parser.error("Refusing to turn off the only or currently focused desktop output")
+    command("niri", "msg", "output", args.output, "off")
     ip = command("tailscale", "ip", "-4").splitlines()[0]
     with socket.socket() as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
