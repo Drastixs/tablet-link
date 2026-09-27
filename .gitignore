@@ -1,0 +1,6 @@
+.local-secret
+android/generated/
+android/build/
+*.pyc
+__pycache__/
+*.apk
