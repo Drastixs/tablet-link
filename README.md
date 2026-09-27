@@ -8,7 +8,7 @@ The installed Niri 26.04 session does not expose virtual-output creation, and th
 
 ## Build and run
 
-No third-party libraries are needed. The Android build uses the installed Android SDK build tools directly. The Linux companion needs Python 3, `grim`, `pactl`, `ydotool` and `ydotoold`, and an active PipeWire Pulse server.
+No third-party libraries are needed. The Android build uses the installed Android SDK build tools directly. The Linux companion needs Python 3, `grim`, `ffmpeg`, `pactl`, `ydotool` and `ydotoold`, and an active PipeWire Pulse server.
 
 1. Run `./scripts/make-secret.sh` once. This generates a private 256-bit secret in `.local-secret`.
 2. Run `./android/build.sh`. The signed APK is `android/build/tablet-link.apk`; install it with `adb install -r android/build/tablet-link.apk` or copy it to the tablet. The APK contains the secret, so keep it private.
@@ -20,6 +20,6 @@ Audio devices appear as **Tablet_Link_Speaker** and **Tablet_Link_Microphone**. 
 
 ## Protocol and limits
 
-The single TCP connection uses a random challenge and HMAC-SHA256 with the shared secret. Tailscale provides transport encryption. Video uses JPEG frames captured with `grim` at up to 10 fps. Audio is mono 48 kHz 16-bit PCM. This is a working first implementation, not a low-latency video codec; high-motion content and slow tailnets may feel sluggish. Only one tablet can connect at a time. The app disconnects when it leaves the foreground.
+The single TCP connection uses a random challenge and HMAC-SHA256 with the shared secret. Tailscale provides transport encryption. Video uses `grim` to capture PPM frames and `ffmpeg` to encode JPEG, typically only a few frames per second. Audio is mono 48 kHz 16-bit PCM. This is a first implementation for desktop apps and calls; high-motion content and slow tailnets will feel sluggish. Only one tablet can connect at a time. The app disconnects when it leaves the foreground.
 
 The Android app targets API 29 or newer and requests microphone permission on first use. The app does not need screen-capture permission because Linux sends the display image to it.

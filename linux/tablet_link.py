@@ -203,10 +203,18 @@ class Session:
     def video_loop(self):
         while not self.stop_event.is_set():
             started = time.monotonic()
-            result = subprocess.run(("grim", "-o", self.output, "-s", "1", "-t", "jpeg",
-                                     "-q", "68", "-c", "-"), capture_output=True)
-            if result.returncode or not result.stdout:
+            capture = subprocess.run(("grim", "-o", self.output, "-s", "1", "-t", "ppm",
+                                      "-c", "-"), capture_output=True)
+            if capture.returncode or not capture.stdout:
                 self.fail("Display capture stopped")
+                return
+            result = subprocess.run(("ffmpeg", "-hide_banner", "-loglevel", "error",
+                                     "-f", "image2pipe", "-vcodec", "ppm", "-i", "pipe:0",
+                                     "-frames:v", "1", "-q:v", "5", "-f", "image2pipe",
+                                     "-vcodec", "mjpeg", "pipe:1"), input=capture.stdout,
+                                    capture_output=True)
+            if result.returncode or not result.stdout:
+                self.fail("Display encoder stopped")
                 return
             try:
                 self.send(2, result.stdout)
@@ -299,7 +307,7 @@ def main():
     parser = argparse.ArgumentParser(description="Tablet Link Linux companion")
     parser.add_argument("--output", required=True, help="Niri output reserved for the tablet")
     args = parser.parse_args()
-    for program in ("niri", "grim", "pactl", "ydotool", "ydotoold", "tailscale"):
+    for program in ("niri", "grim", "ffmpeg", "pactl", "ydotool", "ydotoold", "tailscale"):
         if not shutil.which(program):
             parser.error(f"Missing program: {program}")
     secret_file = ROOT / ".local-secret"
