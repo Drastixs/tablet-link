@@ -18,6 +18,7 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -35,6 +36,7 @@ final class Link {
     private final AtomicBoolean imageQueued = new AtomicBoolean(false);
     private final Object writerLock = new Object();
     private final ArrayBlockingQueue<byte[]> speakerQueue = new ArrayBlockingQueue<>(12);
+    private final LinkedBlockingQueue<byte[]> touchQueue = new LinkedBlockingQueue<>();
     private Socket socket;
     private DataInputStream input;
     private DataOutputStream output;
@@ -50,6 +52,7 @@ final class Link {
         if (!running.compareAndSet(false, true)) return;
         finalError = null;
         speakerQueue.clear();
+        touchQueue.clear();
         notifyState("connecting", "Connecting to " + ip + "…");
         thread = new Thread(() -> run(ip), "Tablet Link");
         thread.start();
@@ -58,6 +61,7 @@ final class Link {
     void stop() {
         running.set(false);
         speakerQueue.offer(new byte[0]);
+        touchQueue.offer(new byte[0]);
         try { if (socket != null) socket.close(); } catch (IOException ignored) { }
         if (recorder != null) {
             try { recorder.stop(); } catch (IllegalStateException ignored) { }
@@ -86,6 +90,7 @@ final class Link {
             new Thread(this::recordLoop, "Tablet microphone").start();
             new Thread(this::playLoop, "Tablet speaker").start();
             new Thread(this::heartbeatLoop, "Tablet heartbeat").start();
+            new Thread(this::touchLoop, "Tablet touch").start();
             while (running.get()) {
                 int type = input.readUnsignedByte();
                 int length = input.readInt();
@@ -121,6 +126,7 @@ final class Link {
         } finally {
             running.set(false);
             speakerQueue.offer(new byte[0]);
+            touchQueue.offer(new byte[0]);
             try { if (socket != null) socket.close(); } catch (IOException ignored) { }
             if (recorder != null) {
                 try { recorder.stop(); } catch (IllegalStateException ignored) { }
@@ -186,7 +192,18 @@ final class Link {
         if (!running.get()) return;
         ByteBuffer packet = ByteBuffer.allocate(9);
         packet.put((byte) action).putFloat(x).putFloat(y);
-        try { send(5, packet.array()); } catch (IOException error) { fail("Touch connection lost"); }
+        touchQueue.offer(packet.array());
+    }
+
+    // Touch events arrive on the main thread, which must not write to the socket.
+    private void touchLoop() {
+        while (running.get()) {
+            try {
+                byte[] packet = touchQueue.take();
+                if (packet.length > 0) send(5, packet);
+            } catch (InterruptedException error) { return; }
+            catch (IOException error) { fail("Touch connection lost"); return; }
+        }
     }
 
     private void send(int type, byte[] data) throws IOException {
