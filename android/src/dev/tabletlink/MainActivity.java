@@ -3,16 +3,16 @@ package dev.tabletlink;
 import android.Manifest;
 import android.app.Activity;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.RectF;
 import android.media.AudioManager;
+import android.media.MediaCodec;
+import android.media.MediaFormat;
 import android.os.Bundle;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -33,7 +33,11 @@ public final class MainActivity extends Activity implements Link.Events {
     private TextView status;
     private Button connect;
     private FrameLayout root;
-    private DisplayView display;
+    private Button disconnect;
+    private volatile DisplayView display;
+    private final Runnable hideDisconnect = () -> { if (disconnect != null) disconnect.setVisibility(View.INVISIBLE); };
+    private int videoWidth;
+    private int videoHeight;
     private boolean connected;
     private boolean visible;
 
@@ -64,6 +68,17 @@ public final class MainActivity extends Activity implements Link.Events {
         super.onStop();
     }
 
+    @Override public void onBackPressed() {
+        if (connected) disconnect();
+        else super.onBackPressed();
+    }
+
+    private void disconnect() {
+        link.stop();
+        setupScreen();
+        status.setText("Disconnected");
+    }
+
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(request, permissions, grants);
         if (request == 1) {
@@ -85,6 +100,7 @@ public final class MainActivity extends Activity implements Link.Events {
 
     private void setupScreen() {
         connected = false;
+        display = null;
         getWindow().getDecorView().setSystemUiVisibility(0);
         root = new FrameLayout(this);
         root.setBackgroundColor(SURFACE);
@@ -145,6 +161,7 @@ public final class MainActivity extends Activity implements Link.Events {
                 return;
             }
             getPreferences(MODE_PRIVATE).edit().putString("desktop_ip", ip).apply();
+            status.setText("");
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
                 requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
             else link.start(ip);
@@ -163,17 +180,25 @@ public final class MainActivity extends Activity implements Link.Events {
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.rgb(19, 23, 25));
-        display = new DisplayView();
-        root.addView(display, new FrameLayout.LayoutParams(-1, -1));
-        Button disconnect = new Button(this);
+        display = new DisplayView(videoWidth, videoHeight);
+        root.addView(display, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        disconnect = new Button(this);
         disconnect.setText("Disconnect");
         disconnect.setTextColor(INK);
         disconnect.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(242, 244, 241)));
         FrameLayout.LayoutParams button = new FrameLayout.LayoutParams(dp(130), dp(46), Gravity.TOP | Gravity.RIGHT);
         button.setMargins(0, dp(12), dp(12), 0);
         root.addView(disconnect, button);
-        disconnect.setOnClickListener(view -> { link.stop(); setupScreen(); status.setText("Disconnected"); });
+        disconnect.setOnClickListener(view -> disconnect());
         setContentView(root);
+        showDisconnect();
+    }
+
+    // The button would cover the desktop, so it only appears briefly: on connecting and on a three-finger touch.
+    private void showDisconnect() {
+        disconnect.setVisibility(View.VISIBLE);
+        root.removeCallbacks(hideDisconnect);
+        root.postDelayed(hideDisconnect, 4000);
     }
 
     @Override public void state(String state, String message) {
@@ -192,46 +217,121 @@ public final class MainActivity extends Activity implements Link.Events {
         }
     }
 
-    @Override public void image(byte[] jpeg) {
-        if (connected && display != null) display.setJpeg(jpeg);
+    @Override public boolean picture(byte[] data, int length, boolean key) {
+        DisplayView view = display;
+        return view != null && view.picture(data, length, key);
     }
 
-    @Override public void size(int width, int height) { /* JPEG supplies the exact render dimensions. */ }
+    @Override public void size(int width, int height) {
+        videoWidth = width;
+        videoHeight = height;
+    }
 
-    private final class DisplayView extends View {
-        private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG);
-        private Bitmap bitmap;
-        private final RectF image = new RectF();
+    private final class DisplayView extends SurfaceView implements SurfaceHolder.Callback {
+        private final int width;
+        private final int height;
+        private final Object codecLock = new Object();
+        private volatile MediaCodec codec;
+        private Thread drain;
         private float scrollY;
         private float lastX;
         private float lastY;
         private boolean touching;
 
-        DisplayView() { super(MainActivity.this); setFocusable(true); }
-
-        void setJpeg(byte[] jpeg) {
-            Bitmap next = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.length);
-            if (next == null) return;
-            Bitmap old = bitmap;
-            bitmap = next;
-            if (old != null) old.recycle();
-            invalidate();
+        DisplayView(int width, int height) {
+            super(MainActivity.this);
+            this.width = Math.max(width, 1);
+            this.height = Math.max(height, 1);
+            getHolder().addCallback(this);
         }
 
-        @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            if (bitmap == null) return;
-            float scale = Math.min(getWidth() / (float) bitmap.getWidth(), getHeight() / (float) bitmap.getHeight());
-            float width = bitmap.getWidth() * scale;
-            float height = bitmap.getHeight() * scale;
-            image.set((getWidth() - width) / 2, (getHeight() - height) / 2,
-                    (getWidth() + width) / 2, (getHeight() + height) / 2);
-            canvas.drawBitmap(bitmap, null, image, paint);
+        // Keeps the desktop's shape, leaving bars when the tablet's differs.
+        @Override protected void onMeasure(int widthSpec, int heightSpec) {
+            int w = MeasureSpec.getSize(widthSpec);
+            int h = MeasureSpec.getSize(heightSpec);
+            if ((long) w * height > (long) h * width) w = (int) ((long) h * width / height);
+            else h = (int) ((long) w * height / width);
+            setMeasuredDimension(w, h);
+        }
+
+        @Override public void surfaceCreated(SurfaceHolder holder) {
+            try {
+                MediaFormat format = MediaFormat.createVideoFormat("video/avc", width, height);
+                format.setInteger("low-latency", 1);
+                MediaCodec next = MediaCodec.createDecoderByType("video/avc");
+                next.configure(format, holder.getSurface(), null, 0);
+                next.start();
+                codec = next;
+                drain = new Thread(() -> drain(next), "Tablet display");
+                drain.start();
+                link.videoReady(true);
+            } catch (Exception error) {
+                link.stop();
+                setupScreen();
+                status.setText("This tablet cannot decode the display stream.");
+                status.setTextColor(ERROR);
+            }
+        }
+
+        @Override public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) { }
+
+        @Override public void surfaceDestroyed(SurfaceHolder holder) {
+            link.videoReady(false);
+            MediaCodec old;
+            synchronized (codecLock) { old = codec; codec = null; }
+            if (old == null) return;
+            try { drain.join(500); } catch (InterruptedException ignored) { }
+            try { old.stop(); } catch (IllegalStateException ignored) { }
+            old.release();
+        }
+
+        boolean picture(byte[] data, int length, boolean key) {
+            synchronized (codecLock) {
+                MediaCodec decoder = codec;
+                if (decoder == null) return false;
+                try {
+                    int index = decoder.dequeueInputBuffer(10000);
+                    if (index < 0) return false;
+                    java.nio.ByteBuffer buffer = decoder.getInputBuffer(index);
+                    if (buffer == null || buffer.capacity() < length) {
+                        decoder.queueInputBuffer(index, 0, 0, 0, 0);
+                        return false;
+                    }
+                    buffer.clear();
+                    buffer.put(data, 0, length);
+                    decoder.queueInputBuffer(index, 0, length, System.nanoTime() / 1000,
+                            key ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
+                    return true;
+                } catch (IllegalStateException error) { return false; }
+            }
+        }
+
+        // Shows each decoded picture immediately; the newest one is always the right one.
+        private void drain(MediaCodec decoder) {
+            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            int shown = 0;
+            long reported = System.nanoTime();
+            try {
+                while (codec == decoder) {
+                    int index = decoder.dequeueOutputBuffer(info, 20000);
+                    if (index >= 0) { decoder.releaseOutputBuffer(index, true); shown++; }
+                    long now = System.nanoTime();
+                    if (now - reported >= 2_000_000_000L) {
+                        Log.i("TabletLink", String.format("display: %.1f fps", shown * 1e9 / (now - reported)));
+                        shown = 0;
+                        reported = now;
+                    }
+                }
+            } catch (IllegalStateException ignored) { }
         }
 
         @Override public boolean onTouchEvent(MotionEvent event) {
-            if (bitmap == null) return true;
-            if (event.getPointerCount() >= 2) {
+            if (event.getPointerCount() >= 3) {
+                if (touching) { link.touch(1, lastX, lastY); touching = false; }
+                showDisconnect();
+                return true;
+            }
+            if (event.getPointerCount() == 2) {
                 if (touching) { link.touch(1, lastX, lastY); touching = false; }
                 float current = (event.getY(0) + event.getY(1)) / 2;
                 if (event.getActionMasked() == MotionEvent.ACTION_MOVE) {
@@ -243,8 +343,8 @@ public final class MainActivity extends Activity implements Link.Events {
                 } else scrollY = current;
                 return true;
             }
-            float x = Math.max(0, Math.min(1, (event.getX() - image.left) / image.width()));
-            float y = Math.max(0, Math.min(1, (event.getY() - image.top) / image.height()));
+            float x = Math.max(0, Math.min(1, event.getX() / getWidth()));
+            float y = Math.max(0, Math.min(1, event.getY() / getHeight()));
             lastX = x;
             lastY = y;
             switch (event.getActionMasked()) {

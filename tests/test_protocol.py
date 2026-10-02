@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "linux"))
-from tablet_link import Session, frame, read_exact
+from tablet_link import AccessUnits, Session, datagrams, frame, read_exact
 
 
 class ProtocolTest(unittest.TestCase):
@@ -52,6 +52,36 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(read_exact(client, 8), b"\x05" + struct.pack("!I", 3) + b"abc")
         client.close()
         server.close()
+
+    def test_access_units_split_pictures_across_arbitrary_chunks(self):
+        start = b"\x00\x00\x00\x01"
+        key = start + b"\x67sps" + start + b"\x68pps" + start + b"\x06sei" + start + b"\x65\x88idr"
+        second = start + b"\x06sei" + start + b"\x41\x9aone"
+        third = start + b"\x41\x9atwo"
+        stream = key + second + third
+        for size in (1, 3, 7, len(stream)):
+            units = AccessUnits()
+            found = []
+            for offset in range(0, len(stream), size):
+                found += units.feed(stream[offset:offset + size])
+            self.assertEqual(found, [(key, True), (second, False)])
+            self.assertTrue(units.picture)
+            self.assertEqual(units.flush(), (third, False))
+            self.assertFalse(units.picture)
+
+    def test_access_units_keep_slices_of_one_picture_together(self):
+        start = b"\x00\x00\x01"
+        picture = start + b"\x41\x9afirst" + start + b"\x41\x1asecond"
+        units = AccessUnits()
+        self.assertEqual(units.feed(picture + start + b"\x41\x9anext"), [(picture, False)])
+
+    def test_datagrams_carry_picture_number_and_position(self):
+        unit = bytes(range(256)) * 10
+        packets = list(datagrams(7, unit, True))
+        self.assertEqual(len(packets), 3)
+        self.assertEqual([struct.unpack("!IHHB", packet[:9]) for packet in packets],
+                         [(7, 0, 3, 1), (7, 1, 3, 1), (7, 2, 3, 1)])
+        self.assertEqual(b"".join(packet[9:] for packet in packets), unit)
 
 
 if __name__ == "__main__":
