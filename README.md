@@ -8,7 +8,7 @@ The installed Niri 26.04 session does not expose virtual-output creation, and th
 
 ## Build and run
 
-No third-party libraries are needed. The Android build uses the installed Android SDK build tools directly. The Linux companion needs Python 3, `grim`, `ffmpeg`, `pactl`, `ydotool` and `ydotoold`, and an active PipeWire Pulse server.
+No third-party libraries are needed. The Android build uses the installed Android SDK build tools directly. The Linux companion needs Python 3, `grim`, `ffmpeg`, `pactl`, write access to `/dev/uinput`, and an active PipeWire Pulse server.
 
 1. Run `./scripts/make-secret.sh` once. This generates a private 256-bit secret in `.local-secret`.
 2. Run `./android/build.sh`. The signed APK is `android/build/tablet-link.apk`; install it with `adb install -r android/build/tablet-link.apk` or copy it to the tablet. The APK contains the secret, so keep it private.

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -95,28 +96,40 @@ class AudioDevices:
             self.temp = None
 
 
-class Wheel:
-    """Small uinput mouse used for vertical wheel events."""
-    def __init__(self):
+class Pointer:
+    """uinput absolute pointer. Niri maps its range onto the bounding box of all outputs."""
+    def __init__(self, width, height):
         self.fd = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
         try:
-            fcntl.ioctl(self.fd, 0x40045564, 1)  # UI_SET_EVBIT, EV_KEY
-            fcntl.ioctl(self.fd, 0x40045564, 2)  # EV_REL
+            for kind in (1, 2, 3):  # UI_SET_EVBIT: EV_KEY, EV_REL, EV_ABS
+                fcntl.ioctl(self.fd, 0x40045564, kind)
             fcntl.ioctl(self.fd, 0x40045565, 272)  # UI_SET_KEYBIT, BTN_LEFT
-            for code in (0, 1, 8):  # REL_X, REL_Y, REL_WHEEL
-                fcntl.ioctl(self.fd, 0x40045566, code)
-            identity = struct.pack("<80sHHHHI256i", b"Tablet Link Wheel", 0x03, 0x1234,
-                                   0x3947, 1, 0, *([0] * 256))
+            fcntl.ioctl(self.fd, 0x40045566, 8)  # UI_SET_RELBIT, REL_WHEEL
+            for code in (0, 1):  # UI_SET_ABSBIT, ABS_X and ABS_Y
+                fcntl.ioctl(self.fd, 0x40045567, code)
+            absmax = [0] * 64
+            absmax[0], absmax[1] = width - 1, height - 1
+            identity = struct.pack("<80sHHHHI256i", b"Tablet Link Pointer", 0x03, 0x1234,
+                                   0x3947, 1, 0, *absmax, *([0] * 192))
             os.write(self.fd, identity)
             fcntl.ioctl(self.fd, 0x5501)  # UI_DEV_CREATE
-            time.sleep(0.15)
+            time.sleep(0.3)
         except Exception:
             os.close(self.fd)
             raise
 
-    def scroll(self, steps):
-        for kind, code, value in ((2, 8, steps), (0, 0, 0)):
+    def emit(self, *events):
+        for kind, code, value in events + ((0, 0, 0),):
             os.write(self.fd, struct.pack("@llHHi", 0, 0, kind, code, value))
+
+    def move(self, x, y):
+        self.emit((3, 0, x), (3, 1, y))
+
+    def button(self, down):
+        self.emit((1, 272, int(down)))
+
+    def scroll(self, steps):
+        self.emit((2, 8, steps))
 
     def close(self):
         fcntl.ioctl(self.fd, 0x5502)  # UI_DEV_DESTROY
@@ -133,8 +146,7 @@ class Session:
         self.audio = AudioDevices()
         self.mic_fd = None
         self.mouse_down = False
-        self.ydotoold = None
-        self.wheel = None
+        self.pointer = None
         self.threads = []
 
     def send(self, kind, payload):
@@ -168,21 +180,17 @@ class Session:
         left = primary["logical"]["x"] - tablet["logical"]["width"]
         top = primary["logical"]["y"]
         command("niri", "msg", "output", self.output, "position", "set", str(left), str(top))
-        tablet = outputs()[self.output]
-        self.geometry = tablet["logical"]
+        logical = [v["logical"] for v in outputs().values() if v.get("logical")]
+        self.geometry = outputs()[self.output]["logical"]
+        self.origin = (min(g["x"] for g in logical), min(g["y"] for g in logical))
+        self.bounds = (max(g["x"] + g["width"] for g in logical) - self.origin[0],
+                       max(g["y"] + g["height"] for g in logical) - self.origin[1])
 
     def start_input(self):
-        path = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / ".ydotool_socket"
-        if not path.exists():
-            self.ydotoold = subprocess.Popen(("ydotoold",), stdout=subprocess.DEVNULL,
-                                             stderr=subprocess.DEVNULL)
-            for _ in range(30):
-                if path.exists():
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError("ydotoold could not start; check /dev/uinput access")
-        self.wheel = Wheel()
+        try:
+            self.pointer = Pointer(*self.bounds)
+        except OSError as error:
+            raise RuntimeError("Could not create the pointer; check /dev/uinput access") from error
 
     def input(self, payload):
         if len(payload) != 9:
@@ -190,20 +198,20 @@ class Session:
         action, nx, ny = struct.unpack("!Bff", payload)
         if action == 3:
             if -1 <= ny <= 1 and ny != 0:
-                self.wheel.scroll(-1 if ny > 0 else 1)
+                self.pointer.scroll(-1 if ny > 0 else 1)
             return
         if not (0 <= nx <= 1 and 0 <= ny <= 1):
             return
-        # ydotool absolute coordinates are compositor-wide logical coordinates.
+        # Pointer coordinates are compositor-wide logical coordinates from the bounding box origin.
         geometry = self.geometry
-        x = geometry["x"] + int(nx * max(geometry["width"] - 1, 1))
-        y = geometry["y"] + int(ny * max(geometry["height"] - 1, 1))
-        command("ydotool", "mousemove", "--absolute", str(x), str(y))
+        x = geometry["x"] - self.origin[0] + int(nx * max(geometry["width"] - 1, 1))
+        y = geometry["y"] - self.origin[1] + int(ny * max(geometry["height"] - 1, 1))
+        self.pointer.move(x, y)
         if action == 0 and not self.mouse_down:
-            command("ydotool", "click", "0x40")
+            self.pointer.button(True)
             self.mouse_down = True
         elif action == 1 and self.mouse_down:
-            command("ydotool", "click", "0x80")
+            self.pointer.button(False)
             self.mouse_down = False
 
     def video_loop(self):
@@ -304,15 +312,12 @@ class Session:
         finally:
             self.stop_event.set()
             if self.mouse_down:
-                subprocess.run(("ydotool", "click", "0x80"), capture_output=True)
+                self.pointer.button(False)
             if self.mic_fd is not None:
                 os.close(self.mic_fd)
             self.audio.stop()
-            if self.ydotoold:
-                self.ydotoold.terminate()
-                self.ydotoold.wait(timeout=2)
-            if self.wheel:
-                self.wheel.close()
+            if self.pointer:
+                self.pointer.close()
             subprocess.run(("niri", "msg", "output", self.output, "off"), capture_output=True)
             self.sock.close()
 
@@ -321,7 +326,7 @@ def main():
     parser = argparse.ArgumentParser(description="Tablet Link Linux companion")
     parser.add_argument("--output", required=True, help="Niri output reserved for the tablet")
     args = parser.parse_args()
-    for program in ("niri", "grim", "ffmpeg", "pactl", "ydotool", "ydotoold", "tailscale"):
+    for program in ("niri", "grim", "ffmpeg", "pactl", "tailscale"):
         if not shutil.which(program):
             parser.error(f"Missing program: {program}")
     secret_file = ROOT / ".local-secret"
@@ -336,6 +341,8 @@ def main():
     if len(available) < 2 or args.output == json.loads(command("niri", "msg", "-j", "focused-output"))["name"]:
         parser.error("Refusing to turn off the only or currently focused desktop output")
     command("niri", "msg", "output", args.output, "off")
+    # A service stop must unwind the session so audio devices and defaults are restored.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     ip = command("tailscale", "ip", "-4").splitlines()[0]
     with socket.socket() as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
